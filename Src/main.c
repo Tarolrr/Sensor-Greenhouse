@@ -1,3 +1,5 @@
+//V1.1.1b:
+//	-added defines for two types of temperature sensor
 //V1.1.0b:
 //	-another sensor used (AM2320)
 //V1.1.0:
@@ -18,12 +20,21 @@
 #include <string.h>
 #include "main.h"
 #include "cmsis_os.h"
-//#include "tm_stm32_ds18b20.h"
 
-#define DEBUG_WO_SENSOR
+#define SENSOR_AM2320
+#define SENSOR_DS18B20_
 #define MySTM_
 #define IWD_Enable_
 
+#ifdef SENSOR_DS18B20
+	#ifdef SENSOR_AM2320
+	#error "Choose one of the sensors"
+	#endif
+#endif
+
+#ifdef SENSOR_DS18B20
+#include "tm_stm32_ds18b20.h"
+#endif
 I2C_HandleTypeDef hi2c1;
 IWDG_HandleTypeDef hiwdg;
 SPI_HandleTypeDef hspi1;
@@ -35,7 +46,9 @@ osTimerId hAlertTimer;
 RTC_HandleTypeDef hrtc;
 RTC_AlarmTypeDef hMainAlarm;
 RTC_AlarmTypeDef hIWDAlarm;
-//TM_OneWire_t	hOneWire;
+#ifdef SENSOR_DS18B20
+TM_OneWire_t	hOneWire;
+#endif
 volatile bool alerted;
 SX1278Drv_LoRaConfiguration cfg;
 uint8_t DS18B20ROM[8];
@@ -52,10 +65,13 @@ static void MX_SPI1_Init(void);
 static void MX_RTC_Init(void);
 static void MX_IWDG_Init(void);
 static void MX_TIM2_Init(void);
+#ifdef SENSOR_AM2320
 static void MX_I2C1_Init(void);
+#endif
 void mainTaskFxn(void const * argument);
 static void RxTimerCallback(void const * argument);
 static void alertTimerCallback(void const * argument);
+void I2C_ClearBusyFlagErratum(struct I2C_Module* i2c);
 
 bool handleAlarms();
 bool addTimeToAlarm(RTC_AlarmTypeDef *a, uint8_t h, uint8_t m, uint8_t s);
@@ -70,15 +86,35 @@ int8_t compareAlarms(RTC_AlarmTypeDef *a, RTC_AlarmTypeDef *b);
 #endif
 int main(void){
 
+
 	HAL_Init();
 
 	SystemClock_Config();
+	HAL_Delay(2000);
 	MX_GPIO_Init();
 	MX_SPI1_Init();
 	MX_RTC_Init();
+#ifdef SENSOR_DS18B20
 	MX_TIM2_Init();
+#endif
+
+
+#ifdef SENSOR_AM2320
 	MX_I2C1_Init();
-	HAL_Delay(500);
+
+	struct I2C_Module i2c;
+	i2c.instance = hi2c1;
+	i2c.sclPin = GPIO_PIN_6;
+	i2c.sdaPin = GPIO_PIN_7;
+	i2c.sclPort = GPIOB;
+	i2c.sdaPort = GPIOB;
+
+	I2C_ClearBusyFlagErratum(&i2c);
+	MX_I2C1_Init();
+	uint8_t data[3] = {0x03, 0x02, 0x02};
+	HAL_StatusTypeDef s1 = HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
+
+#endif
 
 	#ifdef IWD_Enable
 	MX_IWDG_Init();
@@ -87,14 +123,14 @@ int main(void){
 
 	#endif
 
-	#ifndef DEBUG_WO_SENSOR
+#ifdef SENSOR_DS18B20
 
 	TM_OneWire_Init(&hOneWire, GPIOB, GPIO_PIN_7);
 
 	while(!TM_OneWire_First(&hOneWire));
 		TM_OneWire_GetFullROM(&hOneWire,DS18B20ROM);
 
-	#endif
+#endif
 	cfg.bw = SX1278Drv_RegLoRaModemConfig1_BW_125;
 	cfg.cr = SX1278Drv_RegLoRaModemConfig1_CR_4_8;
 	cfg.crc = SX1278Drv_RegLoRaModemConfig2_PayloadCrc_ON;
@@ -154,7 +190,7 @@ void SystemClock_Config(void){
 	RCC_OscInitStruct.LSIState = RCC_LSI_ON;
 	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
 	RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-	RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL6;
+	RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL3;
 	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
 		Error_Handler();
 
@@ -264,6 +300,7 @@ static void MX_TIM2_Init(void){
     Error_Handler();
 }
 
+#ifdef SENSOR_AM2320
 static void MX_I2C1_Init(void){
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 100000;
@@ -277,12 +314,13 @@ static void MX_I2C1_Init(void){
   if (HAL_I2C_Init(&hi2c1) != HAL_OK)
     Error_Handler();
 }
+#endif
 
 void Error_Handler(void){
   while(1);
 }
 
-
+#ifdef SENSOR_AM2320
 uint16_t crc16(uint8_t *ptr, uint8_t len){
 	uint16_t crc =0xFFFF;
 	uint8_t i;
@@ -300,17 +338,11 @@ uint16_t crc16(uint8_t *ptr, uint8_t len){
     }
     return crc;
 }
+#endif
 
 void mainTaskFxn(void const * argument){
 
-	#ifdef DEBUG_WO_SENSOR
-
-	/*taskENTER_CRITICAL();
-	HAL_Delay(1000);
-	taskEXIT_CRITICAL();*/
-
-
-	#else
+	#ifdef SENSOR_DS18B20
 
 	uint32_t timer;
 	TM_DS18B20_StartAll(&hOneWire);
@@ -349,33 +381,28 @@ void mainTaskFxn(void const * argument){
 				if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
 					Error_Handler();
 			}
-			//taskENTER_CRITICAL();
+
+			#ifdef SENSOR_AM2320
+
 			int16_t tmpTemp;
 			uint8_t data[6] = {0x03, 0x02, 0x02};
 			uint16_t rxCRC;
 			while(1){
-				HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
-				HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
+				HAL_StatusTypeDef s1 = HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
+				HAL_StatusTypeDef s2 = HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
 				HAL_Delay(2);
-				HAL_I2C_Master_Receive(&hi2c1,0xB8,data,6,-1);
-
+				HAL_StatusTypeDef s3 = HAL_I2C_Master_Receive(&hi2c1,0xB8,data,6,-1);
 				memcpy((uint8_t *)&rxCRC,data+4,2);
-				HAL_Delay(10);
 				if(rxCRC == crc16(data,4))
 					break;
 			}
 
-			memcpy((uint8_t *)(&tmpTemp),data+2,2);
-			tmpTemp = (tmpTemp >> 8) | (tmpTemp << 8);
-			temperature = (float)tmpTemp/10;
-			#ifdef DEBUG_WO_SENSOR
+			tmpTemp = data[3] | (data[2] << 8);
+			temperature = (float)(tmpTemp)/10;
 
-			/*taskENTER_CRITICAL();
-			HAL_Delay(1000);
-			taskEXIT_CRITICAL();*/
-			//temperature++;
+			#endif
 
-			#else
+			#ifdef SENSOR_DS18B20
 
 			TM_DS18B20_StartAll(&hOneWire);
 
@@ -544,3 +571,101 @@ int8_t compareAlarms(RTC_AlarmTypeDef *a, RTC_AlarmTypeDef *b){
 		}
 	}
 }
+
+
+
+void I2C_ClearBusyFlagErratum(struct I2C_Module* i2c)
+{
+  GPIO_InitTypeDef GPIO_InitStructure;
+
+  // 1. Clear PE bit.
+  i2c->instance.Instance->CR1 &= ~(0x0001);
+
+  //  2. Configure the SCL and SDA I/Os as General Purpose Output Open-Drain, High level (Write 1 to GPIOx_ODR).
+  GPIO_InitStructure.Mode         = GPIO_MODE_OUTPUT_OD;
+  //GPIO_InitStructure.Alternate    = I2C_PIN_MAP;
+  //GPIO_InitStructure.Pull         = GPIO_PULLUP;
+  GPIO_InitStructure.Speed        = GPIO_SPEED_FREQ_HIGH;
+
+  GPIO_InitStructure.Pin          = i2c->sclPin;
+  HAL_GPIO_Init(i2c->sclPort, &GPIO_InitStructure);
+  HAL_GPIO_WritePin(i2c->sclPort, i2c->sclPin, GPIO_PIN_SET);
+
+  GPIO_InitStructure.Pin          = i2c->sdaPin;
+  HAL_GPIO_Init(i2c->sdaPort, &GPIO_InitStructure);
+  HAL_GPIO_WritePin(i2c->sdaPort, i2c->sdaPin, GPIO_PIN_SET);
+
+  // 3. Check SCL and SDA High level in GPIOx_IDR.
+  while (GPIO_PIN_SET != HAL_GPIO_ReadPin(i2c->sclPort, i2c->sclPin))
+  {
+    asm("nop");
+  }
+
+  while (GPIO_PIN_SET != HAL_GPIO_ReadPin(i2c->sdaPort, i2c->sdaPin))
+  {
+    asm("nop");
+  }
+
+  // 4. Configure the SDA I/O as General Purpose Output Open-Drain, Low level (Write 0 to GPIOx_ODR).
+  HAL_GPIO_WritePin(i2c->sdaPort, i2c->sdaPin, GPIO_PIN_RESET);
+
+  //  5. Check SDA Low level in GPIOx_IDR.
+  while (GPIO_PIN_RESET != HAL_GPIO_ReadPin(i2c->sdaPort, i2c->sdaPin))
+  {
+    asm("nop");
+  }
+
+  // 6. Configure the SCL I/O as General Purpose Output Open-Drain, Low level (Write 0 to GPIOx_ODR).
+  HAL_GPIO_WritePin(i2c->sclPort, i2c->sclPin, GPIO_PIN_RESET);
+
+  //  7. Check SCL Low level in GPIOx_IDR.
+  while (GPIO_PIN_RESET != HAL_GPIO_ReadPin(i2c->sclPort, i2c->sclPin))
+  {
+    asm("nop");
+  }
+
+  // 8. Configure the SCL I/O as General Purpose Output Open-Drain, High level (Write 1 to GPIOx_ODR).
+  HAL_GPIO_WritePin(i2c->sclPort, i2c->sclPin, GPIO_PIN_SET);
+
+  // 9. Check SCL High level in GPIOx_IDR.
+  while (GPIO_PIN_SET != HAL_GPIO_ReadPin(i2c->sclPort, i2c->sclPin))
+  {
+    asm("nop");
+  }
+
+  // 10. Configure the SDA I/O as General Purpose Output Open-Drain , High level (Write 1 to GPIOx_ODR).
+  HAL_GPIO_WritePin(i2c->sdaPort, i2c->sdaPin, GPIO_PIN_SET);
+
+  // 11. Check SDA High level in GPIOx_IDR.
+  while (GPIO_PIN_SET != HAL_GPIO_ReadPin(i2c->sdaPort, i2c->sdaPin))
+  {
+    asm("nop");
+  }
+
+  // 12. Configure the SCL and SDA I/Os as Alternate function Open-Drain.
+  GPIO_InitStructure.Mode         = GPIO_MODE_AF_OD;
+ // GPIO_InitStructure.Alternate    = I2C_PIN_MAP;
+
+  GPIO_InitStructure.Pin          = i2c->sclPin;
+  HAL_GPIO_Init(i2c->sclPort, &GPIO_InitStructure);
+
+  GPIO_InitStructure.Pin          = i2c->sdaPin;
+  HAL_GPIO_Init(i2c->sdaPort, &GPIO_InitStructure);
+
+  // 13. Set SWRST bit in I2Cx_CR1 register.
+  i2c->instance.Instance->CR1 |= 0x8000;
+
+  asm("nop");
+
+  // 14. Clear SWRST bit in I2Cx_CR1 register.
+  i2c->instance.Instance->CR1 &= ~0x8000;
+
+  asm("nop");
+
+  // 15. Enable the I2C peripheral by setting the PE bit in I2Cx_CR1 register
+  i2c->instance.Instance->CR1 |= 0x0001;
+
+  // Call initialization function.
+  HAL_I2C_Init(&(i2c->instance));
+}
+
