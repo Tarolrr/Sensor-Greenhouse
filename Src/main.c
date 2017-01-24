@@ -1,3 +1,8 @@
+//V1.1.2b:
+//	-fixed bug for negative temperatures (AM2320 uses its own format)
+//	-fixed error from porting to smartgit (in main.h, freertos.c, stm32f1xx_hal_msp.c)
+//	-handled unimportant warnings
+//	-organised functions related to sensors and IWD to correspondent defines)
 //V1.1.1b:
 //	-added defines for two types of temperature sensor
 //V1.1.0b:
@@ -10,11 +15,11 @@
 //V1.0.2:
 //	-added reset in measurement loop
 //V1.0.1:
+//V1.0.0:
+//	-original version
 
-//V1.0.0 - Original version
-//TODO stopLed is unnecessary
-//TODO unused warnings from static keyword
-//TODO nonblocking sx tx
+//TODO if IWD_Enable -> bug in entering alert mode
+
 #include "stm32f1xx_hal.h"
 #include "SX1278Drv.h"
 #include <string.h>
@@ -25,6 +30,7 @@
 #define SENSOR_DS18B20_
 #define MySTM_
 #define IWD_Enable_
+#define Debug
 
 #ifdef SENSOR_DS18B20
 	#ifdef SENSOR_AM2320
@@ -34,59 +40,67 @@
 
 #ifdef SENSOR_DS18B20
 #include "tm_stm32_ds18b20.h"
+TIM_HandleTypeDef htim2;
+TM_OneWire_t	hOneWire;
+uint8_t DS18B20ROM[8];
+volatile bool tim2Update = false;
 #endif
-I2C_HandleTypeDef hi2c1;
-IWDG_HandleTypeDef hiwdg;
+
+
 SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim2;
+
 osThreadId hMainTask;
 osTimerId hRxTimer;
 osTimerId hAlertTimer;
 RTC_HandleTypeDef hrtc;
 RTC_AlarmTypeDef hMainAlarm;
-RTC_AlarmTypeDef hIWDAlarm;
-#ifdef SENSOR_DS18B20
-TM_OneWire_t	hOneWire;
-#endif
+
+
 volatile bool alerted;
 SX1278Drv_LoRaConfiguration cfg;
-uint8_t DS18B20ROM[8];
+
 float temperature;
 uint8_t sendedMessageCount;
 volatile bool deepSleep = false;
-volatile bool tim2Update = false;
+
 bool dateChanged;
-uint16_t crc16(uint8_t *ptr, uint8_t len);
+
 void SystemClock_Config(void);
 void Error_Handler(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_RTC_Init(void);
+
+#ifdef IWD_Enable
+IWDG_HandleTypeDef hiwdg;
+RTC_AlarmTypeDef hIWDAlarm;
 static void MX_IWDG_Init(void);
-static void MX_TIM2_Init(void);
-#ifdef SENSOR_AM2320
-static void MX_I2C1_Init(void);
+bool handleAlarms();
 #endif
+
+#ifdef SENSOR_DS18B20
+static void MX_TIM2_Init(void);
+#endif
+
+#ifdef SENSOR_AM2320
+I2C_HandleTypeDef hi2c1;
+uint16_t crc16(uint8_t *ptr, uint8_t len);
+static void MX_I2C1_Init(void);
+void I2C_ClearBusyFlagErratum(struct I2C_Module* i2c);
+#endif
+
 void mainTaskFxn(void const * argument);
 static void RxTimerCallback(void const * argument);
 static void alertTimerCallback(void const * argument);
-void I2C_ClearBusyFlagErratum(struct I2C_Module* i2c);
 
-bool handleAlarms();
 bool addTimeToAlarm(RTC_AlarmTypeDef *a, uint8_t h, uint8_t m, uint8_t s);
 int8_t compareAlarms(RTC_AlarmTypeDef *a, RTC_AlarmTypeDef *b);
 
-#ifdef DEBUG_I2C
-
-#define I2C_TIMEOUT_FLAG          ((uint32_t)35)     /*!< Timeout 35 ms */
-#define I2C_TIMEOUT_ADDR_SLAVE    ((uint32_t)10000)  /*!< Timeout 10 s  */
-#define I2C_TIMEOUT_BUSY_FLAG     ((uint32_t)10000)  /*!< Timeout 10 s  */
-
-#endif
 int main(void){
-
-
+#ifdef Debug
+	HAL_DBGMCU_DisableDBGStopMode();
+#endif
 	HAL_Init();
 
 	SystemClock_Config();
@@ -94,10 +108,6 @@ int main(void){
 	MX_GPIO_Init();
 	MX_SPI1_Init();
 	MX_RTC_Init();
-#ifdef SENSOR_DS18B20
-	MX_TIM2_Init();
-#endif
-
 
 #ifdef SENSOR_AM2320
 	MX_I2C1_Init();
@@ -112,18 +122,18 @@ int main(void){
 	I2C_ClearBusyFlagErratum(&i2c);
 	MX_I2C1_Init();
 	uint8_t data[3] = {0x03, 0x02, 0x02};
-	HAL_StatusTypeDef s1 = HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
+	/*HAL_StatusTypeDef s1 = */HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
 
 #endif
 
-	#ifdef IWD_Enable
+#ifdef IWD_Enable
 	MX_IWDG_Init();
 
 	HAL_IWDG_Start(&hiwdg);
-
-	#endif
+#endif
 
 #ifdef SENSOR_DS18B20
+	MX_TIM2_Init();
 
 	TM_OneWire_Init(&hOneWire, GPIOB, GPIO_PIN_7);
 
@@ -134,29 +144,23 @@ int main(void){
 	cfg.bw = SX1278Drv_RegLoRaModemConfig1_BW_125;
 	cfg.cr = SX1278Drv_RegLoRaModemConfig1_CR_4_8;
 	cfg.crc = SX1278Drv_RegLoRaModemConfig2_PayloadCrc_ON;
-	#ifdef MySTM
-	cfg.frequency = 434e6;
-	#else
-	cfg.frequency = 868e6;
-	#endif
 	cfg.hdrMode = SX1278Drv_RegLoRaModemConfig1_HdrMode_Explicit;
 	cfg.power = 10;
 	cfg.preambleLength = 20;
 	cfg.sf = SX1278Drv_RegLoRaModemConfig2_SF_12;
 	cfg.spi = &hspi1;
-	#ifdef MySTM
+	cfg.sleepInIdle = true;
+#ifdef MySTM
+	cfg.frequency = 434e6;
 	cfg.spi_css_pin = &SPICSMyPin;
-	#else
-	cfg.spi_css_pin = &SPICSPin;
-	#endif
-	//cfg.rx_led = &LoRaTxRxPin;
-	#ifdef MySTM
 	cfg.tx_led = &LoRaTxRxPin;
-	#else
+#else
+	cfg.frequency = 868e6;
+	cfg.spi_css_pin = &SPICSPin;
 	cfg.rx_en = &LoRaRxEnPin;
 	cfg.tx_en = &LoRaTxEnPin;
-	#endif
-	cfg.sleepInIdle = true;
+#endif
+
 
 	uint16_t coordAddress = 0;
 
@@ -190,7 +194,7 @@ void SystemClock_Config(void){
 	RCC_OscInitStruct.LSIState = RCC_LSI_ON;
 	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
 	RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-	RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL3;
+	RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL6;
 	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
 		Error_Handler();
 
@@ -269,36 +273,40 @@ static void MX_RTC_Init(void){
     Error_Handler();
 }
 
+#ifdef IWD_Enable
 static void MX_IWDG_Init(void){
-  hiwdg.Instance = IWDG;
-  hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
-  hiwdg.Init.Reload = 4095;
-  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
-    Error_Handler();
+	hiwdg.Instance = IWDG;
+	hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
+	hiwdg.Init.Reload = 4095;
+	if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+		Error_Handler();
 }
+#endif
 
+#ifdef SENSOR_DS18B20
 /* TIM2 init function */
 static void MX_TIM2_Init(void){
-  TIM_ClockConfigTypeDef sClockSourceConfig;
-  TIM_MasterConfigTypeDef sMasterConfig;
+	TIM_ClockConfigTypeDef sClockSourceConfig;
+	TIM_MasterConfigTypeDef sMasterConfig;
 
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 47;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_DOWN;
-  htim2.Init.Period = 0;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-    Error_Handler();
+	htim2.Instance = TIM2;
+	htim2.Init.Prescaler = 47;
+	htim2.Init.CounterMode = TIM_COUNTERMODE_DOWN;
+	htim2.Init.Period = 0;
+	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+		Error_Handler();
 
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-    Error_Handler();
+	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+	if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+		Error_Handler();
 
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-    Error_Handler();
+	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+	if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+		Error_Handler();
 }
+#endif
 
 #ifdef SENSOR_AM2320
 static void MX_I2C1_Init(void){
@@ -342,7 +350,7 @@ uint16_t crc16(uint8_t *ptr, uint8_t len){
 
 void mainTaskFxn(void const * argument){
 
-	#ifdef SENSOR_DS18B20
+#ifdef SENSOR_DS18B20
 
 	uint32_t timer;
 	TM_DS18B20_StartAll(&hOneWire);
@@ -355,12 +363,12 @@ void mainTaskFxn(void const * argument){
 			break;
 	}
 
-	#endif
+#endif
 
 	for(;;){
-
+#ifdef IWD_Enable
 		if(handleAlarms()){
-
+#endif
 			if(deepSleep){
 				deepSleep = false;
 
@@ -382,27 +390,30 @@ void mainTaskFxn(void const * argument){
 					Error_Handler();
 			}
 
-			#ifdef SENSOR_AM2320
+#ifdef SENSOR_AM2320
 
 			int16_t tmpTemp;
 			uint8_t data[6] = {0x03, 0x02, 0x02};
 			uint16_t rxCRC;
 			while(1){
-				HAL_StatusTypeDef s1 = HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
-				HAL_StatusTypeDef s2 = HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
+				/*HAL_StatusTypeDef s1 = */HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
+				/*HAL_StatusTypeDef s2 = */HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
 				HAL_Delay(2);
-				HAL_StatusTypeDef s3 = HAL_I2C_Master_Receive(&hi2c1,0xB8,data,6,-1);
+				/*HAL_StatusTypeDef s3 = */HAL_I2C_Master_Receive(&hi2c1,0xB8,data,6,-1);
 				memcpy((uint8_t *)&rxCRC,data+4,2);
 				if(rxCRC == crc16(data,4))
 					break;
 			}
 
-			tmpTemp = data[3] | (data[2] << 8);
+			tmpTemp = data[3] | ((data[2]&(0x7F)) << 8);
+			if(data[2] & 0x80)
+				tmpTemp *= -1;
+
 			temperature = (float)(tmpTemp)/10;
 
-			#endif
+#endif
 
-			#ifdef SENSOR_DS18B20
+#ifdef SENSOR_DS18B20
 
 			TM_DS18B20_StartAll(&hOneWire);
 
@@ -417,27 +428,23 @@ void mainTaskFxn(void const * argument){
 			if(temperature > 80)
 							continue;
 
-			#endif
+#endif
 
 			SX1278Drv_Resume();
 
 			sendedMessageCount = 0;
 			osTimerStart(hRxTimer,SX1278Drv_GetRandomDelay(MinimumRxTimeout,1000));
+#ifdef IWD_Enable
 		}
-		#ifdef IWD_Enable
 		HAL_IWDG_Refresh(&hiwdg);
-		#endif
-		#ifdef DEBUG_WO_SENSOR
-		GPIO_PIN_SET(&LoRaTxRxPin);
-		#endif
+#endif
+
 		vTaskSuspend(hMainTask);
-		#ifdef DEBUG_WO_SENSOR
-		GPIO_PIN_RESET(&LoRaTxRxPin);
-		#endif
 
 	}
 }
 
+#ifdef IWD_Enable
 bool handleAlarms(){
 	if((compareAlarms(&hMainAlarm, &hIWDAlarm) <= 0) ^ dateChanged){
 		if(alerted)
@@ -451,6 +458,7 @@ bool handleAlarms(){
 	HAL_RTC_SetAlarm_IT(&hrtc,&hIWDAlarm,RTC_FORMAT_BIN);
 	return false;
 }
+#endif
 
 static void RxTimerCallback(void const * argument){
 	#ifdef IWD_Enable
@@ -461,10 +469,17 @@ static void RxTimerCallback(void const * argument){
 		return;
 
 	if(sendedMessageCount == RetryCount){
+#ifdef IWD_Enable
 		HAL_RTC_GetTime(&hrtc,&hIWDAlarm.AlarmTime,RTC_FORMAT_BIN);
 		dateChanged ^= addTimeToAlarm(&hIWDAlarm, 0, 0, 20);
 		HAL_RTC_SetAlarm_IT(&hrtc,&hIWDAlarm,RTC_FORMAT_BIN);
-
+#else
+		if(alerted)
+			addTimeToAlarm(&hMainAlarm, 0, AlertWakeupPeriodInMinutes, 0);
+		else
+			addTimeToAlarm(&hMainAlarm, 0, NormalWakeupPeriodInMinutes, 0);
+		HAL_RTC_SetAlarm_IT(&hrtc,&hMainAlarm,RTC_FORMAT_BIN);
+#endif
 		SX1278Drv_Suspend();
 		return;
 	}
@@ -506,9 +521,18 @@ void SX1278Drv_LoRaRxCallback(LoRa_Message *msg){
 	else if(msg->payload[0] == 0)
 		alerted = false;
 
+#ifdef IWD_Enable
+
 	HAL_RTC_GetTime(&hrtc,&hIWDAlarm.AlarmTime,RTC_FORMAT_BIN);
 	dateChanged ^= addTimeToAlarm(&hIWDAlarm, 0, 0, 20);
 	HAL_RTC_SetAlarm_IT(&hrtc,&hIWDAlarm,RTC_FORMAT_BIN);
+#else
+	if(alerted)
+		addTimeToAlarm(&hMainAlarm, 0, AlertWakeupPeriodInMinutes, 0);
+	else
+		addTimeToAlarm(&hMainAlarm, 0, NormalWakeupPeriodInMinutes, 0);
+	HAL_RTC_SetAlarm_IT(&hrtc,&hMainAlarm,RTC_FORMAT_BIN);
+#endif
 
 	SX1278Drv_Suspend();
 }
@@ -526,10 +550,12 @@ void SX1278Drv_LoRaTxCallback(LoRa_Message *msg){
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim->Instance == TIM1)
     HAL_IncTick();
+#ifdef SENSOR_DS18B20
   if (htim->Instance == TIM2){
 	  tim2Update = true;
 	  HAL_TIM_Base_Stop_IT(htim);
   }
+#endif
 }
 
 bool addTimeToAlarm(RTC_AlarmTypeDef *a, uint8_t h, uint8_t m, uint8_t s){
@@ -571,8 +597,6 @@ int8_t compareAlarms(RTC_AlarmTypeDef *a, RTC_AlarmTypeDef *b){
 		}
 	}
 }
-
-
 
 void I2C_ClearBusyFlagErratum(struct I2C_Module* i2c)
 {

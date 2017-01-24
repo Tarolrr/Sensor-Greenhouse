@@ -25,6 +25,8 @@ struct {
 	uint16_t pinNumber;
 } typedef MessagePinStateChange;	//Используется в очереди
 
+#pragma GCC diagnostic ignored "-Wunused-variable"
+
 static PinDescription SPICSMyPin = {GPIOA, GPIO_PIN_4, 0, 0};
 static PinDescription SPICSPin = {GPIOB, GPIO_PIN_0, 0, 0};
 static PinDescription LoRaTxRxPin = {GPIOC, GPIO_PIN_13, 0, 0};

@@ -46,7 +46,7 @@ void PreSleepProcessing(uint32_t *ulExpectedIdleTime);
 void PostSleepProcessing(uint32_t *ulExpectedIdleTime);
 
 void PreSleepProcessing(uint32_t *ulExpectedIdleTime){
-	if(HAL_GetTick() > 2000){
+	if(HAL_GetTick() > 4000){
 		CLEAR_BIT(PWR->CR,  PWR_CR_PDDS);
 		MODIFY_REG(PWR->CR, PWR_CR_LPDS, PWR_MAINREGULATOR_ON);
 		SET_BIT(SCB->SCR, ((uint32_t)SCB_SCR_SLEEPDEEP_Msk));

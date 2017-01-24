@@ -11,10 +11,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include "pin_description.h"
-//#include "SensorDesc.h"
-//#include "ActuatorDesc.h"
 #include "GUID.h"
-#include "ChannelDesc.h"
 
 const uint64_t GUID[] = {
 	0x848B04992EC34F28,
@@ -32,5 +29,13 @@ const uint16_t LoRaAddress = 4 | LoRaDeviceType_Sensor;
 #define MinimumRxTimeout 500
 #define RetryCount 5
 
+struct I2C_Module
+{
+  I2C_HandleTypeDef   instance;
+  uint16_t            sdaPin;
+  GPIO_TypeDef*       sdaPort;
+  uint16_t            sclPin;
+  GPIO_TypeDef*       sclPort;
+};
 
 #endif /* MAIN_H_ */
