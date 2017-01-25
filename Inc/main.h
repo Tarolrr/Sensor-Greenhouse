@@ -21,7 +21,7 @@ const uint64_t GUID[] = {
 #define LoRaDeviceType_Sensor		0x0000
 
 const uint8_t NetworkID = 0x01;
-const uint16_t LoRaAddress = 4 | LoRaDeviceType_Sensor;
+const uint16_t LoRaAddress = 1 | LoRaDeviceType_Sensor;
 
 #define ChannelNumber 				1
 #define NormalWakeupPeriodInMinutes		10

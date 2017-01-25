@@ -1,3 +1,6 @@
+//V1.1.3b:
+//	-added sowtware reset in Error_handler function (apparently sometimes called in case of collision)
+//	-added max retries when measuring temperature. If measurement failed - returned temperature is +466 C
 //V1.1.2b:
 //	-fixed bug for negative temperatures (AM2320 uses its own format)
 //	-fixed error from porting to smartgit (in main.h, freertos.c, stm32f1xx_hal_msp.c)
@@ -19,7 +22,8 @@
 //	-original version
 
 //TODO if IWD_Enable -> bug in entering alert mode
-
+//TODO bug in transmitting temperature - previous temperature is transmitted in normal mode.
+//TODO bug in collision - sometimes program hangs in mainTask->HAL_RCC_OscConfig->Error_Handler
 #include "stm32f1xx_hal.h"
 #include "SX1278Drv.h"
 #include <string.h>
@@ -30,7 +34,8 @@
 #define SENSOR_DS18B20_
 #define MySTM_
 #define IWD_Enable_
-#define Debug
+#define Debug_
+#define TestCollisions_
 
 #ifdef SENSOR_DS18B20
 	#ifdef SENSOR_AM2320
@@ -167,7 +172,7 @@ int main(void){
 	SX1278Drv_Init(&cfg);
 	SX1278Drv_SetAdresses(0, &coordAddress, 1);
 	SX1278Drv_Config();
-	SX1278Drv_Suspend();
+	//SX1278Drv_Suspend();
 
 	osThreadDef(MainTask, mainTaskFxn, osPriorityNormal, 0, 512);
 	hMainTask = osThreadCreate(osThread(MainTask), NULL);
@@ -325,6 +330,7 @@ static void MX_I2C1_Init(void){
 #endif
 
 void Error_Handler(void){
+	NVIC_SystemReset();
   while(1);
 }
 
@@ -395,6 +401,7 @@ void mainTaskFxn(void const * argument){
 			int16_t tmpTemp;
 			uint8_t data[6] = {0x03, 0x02, 0x02};
 			uint16_t rxCRC;
+			uint8_t count = 0;
 			while(1){
 				/*HAL_StatusTypeDef s1 = */HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
 				/*HAL_StatusTypeDef s2 = */HAL_I2C_Master_Transmit(&hi2c1,0xB8,data,3,-1);
@@ -403,6 +410,11 @@ void mainTaskFxn(void const * argument){
 				memcpy((uint8_t *)&rxCRC,data+4,2);
 				if(rxCRC == crc16(data,4))
 					break;
+				if(count++ > 10){
+					data[2] = 0x12;
+					data[3] = 0x34;
+					break;
+				}
 			}
 
 			tmpTemp = data[3] | ((data[2]&(0x7F)) << 8);
@@ -474,11 +486,15 @@ static void RxTimerCallback(void const * argument){
 		dateChanged ^= addTimeToAlarm(&hIWDAlarm, 0, 0, 20);
 		HAL_RTC_SetAlarm_IT(&hrtc,&hIWDAlarm,RTC_FORMAT_BIN);
 #else
+#ifdef TestCollisions
+		addTimeToAlarm(&hMainAlarm, 0, 0, 15);
+#else
 		if(alerted)
 			addTimeToAlarm(&hMainAlarm, 0, AlertWakeupPeriodInMinutes, 0);
 		else
 			addTimeToAlarm(&hMainAlarm, 0, NormalWakeupPeriodInMinutes, 0);
 		HAL_RTC_SetAlarm_IT(&hrtc,&hMainAlarm,RTC_FORMAT_BIN);
+#endif
 #endif
 		SX1278Drv_Suspend();
 		return;
@@ -527,11 +543,16 @@ void SX1278Drv_LoRaRxCallback(LoRa_Message *msg){
 	dateChanged ^= addTimeToAlarm(&hIWDAlarm, 0, 0, 20);
 	HAL_RTC_SetAlarm_IT(&hrtc,&hIWDAlarm,RTC_FORMAT_BIN);
 #else
-	if(alerted)
-		addTimeToAlarm(&hMainAlarm, 0, AlertWakeupPeriodInMinutes, 0);
-	else
-		addTimeToAlarm(&hMainAlarm, 0, NormalWakeupPeriodInMinutes, 0);
-	HAL_RTC_SetAlarm_IT(&hrtc,&hMainAlarm,RTC_FORMAT_BIN);
+#ifdef TestCollisions
+		addTimeToAlarm(&hMainAlarm, 0, 0, 15);
+#else
+		if(alerted)
+			addTimeToAlarm(&hMainAlarm, 0, AlertWakeupPeriodInMinutes, 0);
+		else
+			addTimeToAlarm(&hMainAlarm, 0, NormalWakeupPeriodInMinutes, 0);
+#endif
+		HAL_RTC_SetAlarm_IT(&hrtc,&hMainAlarm,RTC_FORMAT_BIN);
+
 #endif
 
 	SX1278Drv_Suspend();
